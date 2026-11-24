@@ -1,0 +1,50 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+/build
+
+# env files and secrets: never commit. Only the placeholder example is tracked.
+.env*
+!.env.example
+*.pem
+*.key
+*.p12
+# credential and secret files (by type, so source files such as
+# server/actions/credentials.ts, the certificates code, stay tracked)
+*[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll][Ss]*.txt
+*[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll][Ss]*.json
+*[Ss][Ee][Cc][Rr][Ee][Tt]*.txt
+*[Ss][Ee][Cc][Rr][Ee][Tt]*.json
+service-account*.json
+.mcp.json
+.claude/
+
+# database dumps and data exports (may contain personal data)
+*.sql.gz
+*.dump
+/backup/
+/import/
+*.xlsx
+*.xls
+*.csv
+
+# vercel / supabase local state
+.vercel
+supabase/.temp/
+supabase/.branches/
+
+# misc
+.DS_Store
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.tsbuildinfo
+next-env.d.ts

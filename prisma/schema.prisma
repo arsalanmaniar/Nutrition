@@ -1,0 +1,661 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ===== Nutrition E-Portal (CDN-EP) =====
+//
+// Clinical Dietetics & Nutrition E-Portal — see CDN-EP-PLAN.md. Everything in
+// this block is additive: Nutrition* models on nutr_* tables, and enums whose
+// database types are named nutr_*. No relation here points at a model above,
+// and nothing above points here, so the existing modules are unaffected.
+//
+// Conventions in this block:
+//  - createdBy is the Supabase auth user id (auth.users.id) of whoever created
+//    the row, NOT a NutritionProfile id: a super_admin acts as nutrition ADMIN
+//    without having a profile. Every other person column (traineeId,
+//    assessorId, …) holds a NutritionProfile id.
+//  - Every relation is ON DELETE RESTRICT. Nothing cascades, so a training
+//    record cannot disappear as a side effect of another delete. People are
+//    deactivated (NutritionProfile.isActive), never deleted.
+//  - PRIVACY: no patient name, MRN, phone or address anywhere in this block,
+//    Json columns included. A case is identified by an internal case code only.
+//  - Json answers and scores are keyed by the item keys in
+//    src/features/nutrition/config/forms.ts. formVersion records which version
+//    of that definition a row was filled in against.
+
+enum NutritionRole {
+  TRAINEE
+  PRECEPTOR
+  UNIT_LEAD
+  ASSESSOR
+  ADMIN
+
+  @@map("nutr_role")
+}
+
+enum EpaLevel {
+  E1 // Observer
+  E2 // Direct supervision
+  E3 // Indirect supervision
+  E4 // Unsupervised (spot-checked)
+  E5 // Supervises / teaches others
+
+  @@map("nutr_epa_level")
+}
+
+enum MillerLevel {
+  KNOWS
+  KNOWS_HOW
+  SHOWS_HOW
+  DOES
+
+  @@map("nutr_miller_level")
+}
+
+enum SubmissionStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+
+  @@map("nutr_submission_status")
+}
+
+enum StandardRating {
+  DEVELOPING
+  MEETS
+  EXCEEDS
+
+  @@map("nutr_standard_rating")
+}
+
+enum WpbaType {
+  MINI_CEX
+  DOPS
+  CBD
+  OSCE
+
+  @@map("nutr_wpba_type")
+}
+
+// E-logbook case forms. Their fields are not in the spec yet (plan Open Items).
+enum CaseFormType {
+  A
+  B
+  C
+  D
+
+  @@map("nutr_case_form_type")
+}
+
+// An enum, not a string, because Form 1.3's confidentiality rules key on it:
+// a stray "1.3" must not be able to slip past them.
+enum EvaluationFormType {
+  FORM_1_1 // trainee, monthly
+  FORM_1_2 // preceptor → trainee, Months 4/8/12
+  FORM_1_3 // trainee → preceptor, Months 4/8/12 — CONFIDENTIAL
+  FORM_3_1 // MDGRS, preceptor → trainee, monthly
+  WEEKLY // weekly check-in by the trainee; the preceptor may comment
+
+  @@map("nutr_evaluation_form_type")
+}
+
+// Who may use /nutrition, and in which role. No self-signup: an admin creates
+// every row. A super_admin needs no row to act as ADMIN.
+model NutritionProfile {
+  id                String        @id @default(uuid())
+  // Supabase auth.users.id as a plain string — deliberately no foreign key into
+  // existing tables. Nullable so a profile linked by email can exist before its
+  // auth user id is known (plan decision 6); Step 3 fills it in.
+  authUserId        String?       @unique
+  // Stored lowercased.
+  email             String        @unique
+  fullName          String
+  role              NutritionRole
+  institution       String?
+  // Trainees only: day one of the 12-month program. The Step 4 scheduler
+  // derives every due form from it.
+  trainingStartDate DateTime?     @db.Date
+  // false = access revoked.
+  isActive          Boolean       @default(true)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  createdBy         String
+
+  assignmentsAsTrainee     NutritionPreceptorAssignment[] @relation("AssignmentTrainee")
+  assignmentsAsPreceptor   NutritionPreceptorAssignment[] @relation("AssignmentPreceptor")
+  rotationsLed             NutritionRotation[]
+  rotationEntries          NutritionRotationEntry[]       @relation("RotationEntryTrainee")
+  rotationEntriesPrecepted NutritionRotationEntry[]       @relation("RotationEntryPreceptor")
+  rotationEntriesVerified  NutritionRotationEntry[]       @relation("RotationEntryVerifier")
+  caseLogs                 NutritionCaseLog[]             @relation("CaseLogTrainee")
+  caseLogsReviewed         NutritionCaseLog[]             @relation("CaseLogReviewer")
+  evaluationsAbout         NutritionEvaluationForm[]      @relation("EvaluationSubject")
+  evaluationsAuthored      NutritionEvaluationForm[]      @relation("EvaluationAuthor")
+  evaluationsReviewed      NutritionEvaluationForm[]      @relation("EvaluationReviewer")
+  wpbas                    NutritionWpba[]                @relation("WpbaTrainee")
+  wpbasAssessed            NutritionWpba[]                @relation("WpbaAssessor")
+  epaAssessments           NutritionEpaAssessment[]       @relation("EpaTrainee")
+  epaAssessmentsGiven      NutritionEpaAssessment[]       @relation("EpaAssessor")
+  standardsChecklists      NutritionStandardsChecklist[]
+  msfInvites               NutritionMsfInvite[]
+  remediationPlans         NutritionRemediationPlan[]
+  credentials              NutritionCredential[]
+  attendanceRecords        NutritionAttendanceRecord[]    @relation("AttendanceRecordTrainee")
+  attendanceHolidays       NutritionAttendanceHoliday[]   @relation("AttendanceHolidayScope")
+  attendanceSchedules      NutritionAttendanceSchedule[]  @relation("AttendanceScheduleScope")
+
+  @@index([role])
+  @@map("nutr_profile")
+}
+
+// A trainee's primary preceptor. Reassigning deactivates the old row and adds a
+// new one, so earlier forms stay attributable to whoever supervised then. One
+// active row per trainee is enforced by the Step 3 server action.
+model NutritionPreceptorAssignment {
+  id          String   @id @default(uuid())
+  traineeId   String
+  preceptorId String
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdBy   String
+
+  trainee   NutritionProfile @relation("AssignmentTrainee", fields: [traineeId], references: [id], onDelete: Restrict)
+  preceptor NutritionProfile @relation("AssignmentPreceptor", fields: [preceptorId], references: [id], onDelete: Restrict)
+
+  @@index([traineeId, active])
+  @@index([preceptorId, active])
+  @@map("nutr_preceptor_assignment")
+}
+
+// A clinical rotation, e.g. Pediatric Cardiology, Nephrology, Trauma ICU,
+// Diabetes Clinic. Retired with isActive = false rather than deleted.
+model NutritionRotation {
+  id         String   @id @default(uuid())
+  name       String   @unique
+  // The Rotation Unit Lead who verifies trainees' entries on this rotation.
+  unitLeadId String?
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  createdBy  String
+
+  unitLead NutritionProfile?        @relation(fields: [unitLeadId], references: [id], onDelete: Restrict)
+  entries  NutritionRotationEntry[]
+  caseLogs NutritionCaseLog[]
+
+  @@index([unitLeadId])
+  @@map("nutr_rotation")
+}
+
+// One trainee's placement on one rotation.
+model NutritionRotationEntry {
+  id                  String    @id @default(uuid())
+  traineeId           String
+  rotationId          String
+  // Supervises this placement only. Kept separate from the primary preceptor,
+  // so a rotation preceptor can submit WPBAs (Step 5) without changing it.
+  rotationPreceptorId String?
+  startDate           DateTime  @db.Date
+  endDate             DateTime? @db.Date
+  hours               Float?
+  // The unit lead's sign-off; both NULL until verified.
+  verifiedById        String?
+  verifiedAt          DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  createdBy           String
+
+  trainee           NutritionProfile  @relation("RotationEntryTrainee", fields: [traineeId], references: [id], onDelete: Restrict)
+  rotation          NutritionRotation @relation(fields: [rotationId], references: [id], onDelete: Restrict)
+  rotationPreceptor NutritionProfile? @relation("RotationEntryPreceptor", fields: [rotationPreceptorId], references: [id], onDelete: Restrict)
+  verifiedBy        NutritionProfile? @relation("RotationEntryVerifier", fields: [verifiedById], references: [id], onDelete: Restrict)
+  wpbas             NutritionWpba[]
+
+  @@index([traineeId])
+  @@index([rotationId])
+  @@index([rotationPreceptorId])
+  @@map("nutr_rotation_entry")
+}
+
+// Clinical e-logbook entry (Step 3): DRAFT → SUBMITTED → APPROVED / REJECTED.
+// PRIVACY: a case is identified only by caseCode, ageBand and
+// diagnosisCategory — never a name, MRN, phone or address, here or in `data`.
+model NutritionCaseLog {
+  id                String           @id @default(uuid())
+  traineeId         String
+  rotationId        String?
+  // The program's internal case code. Never an MRN.
+  caseCode          String
+  // e.g. "1–5 years". A band, never a date of birth.
+  ageBand           String
+  diagnosisCategory String
+  formType          CaseFormType
+  formVersion       Int
+  // The Form A–D fields.
+  data              Json
+  // Tagged by the trainee. Optional while drafting, required to submit.
+  epaLevel          EpaLevel?
+  status            SubmissionStatus @default(DRAFT)
+  submittedAt       DateTime?
+  // Preceptor review.
+  reviewedById      String?
+  reviewedAt        DateTime?
+  reviewComment     String?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  createdBy         String
+
+  trainee    NutritionProfile   @relation("CaseLogTrainee", fields: [traineeId], references: [id], onDelete: Restrict)
+  rotation   NutritionRotation? @relation(fields: [rotationId], references: [id], onDelete: Restrict)
+  reviewedBy NutritionProfile?  @relation("CaseLogReviewer", fields: [reviewedById], references: [id], onDelete: Restrict)
+  // CbDs that discussed this case (Step 5).
+  wpbas      NutritionWpba[]
+
+  // One case code per trainee; created by prisma/nutrition-step3.sql, item 1.
+  @@unique([traineeId, caseCode], map: "nutr_case_log_trainee_case_code_key")
+  @@index([traineeId, status])
+  @@index([rotationId])
+  @@index([reviewedById])
+  @@map("nutr_case_log")
+}
+
+// One filled-in periodic form (Step 4): Form 1.1, 1.2, 1.3, 3.1 (MDGRS) or a
+// weekly check-in. Items, scales and maxima live in config/forms.ts; scores are
+// computed server-side, never taken from the client.
+//
+// FORM 1.3 IS CONFIDENTIAL: the trainee rates their preceptor. On FORM_1_3 rows:
+//  - subjectId is the PRECEPTOR being rated;
+//  - authorId and createdBy are always NULL, so no column names the trainee;
+//  - authorHash = HMAC-SHA256(server-only secret, trainee + preceptor +
+//    assessment point). Keyed, so it cannot be reversed by hashing every
+//    trainee id; deterministic, so the server can still find the trainee's own
+//    draft and refuse a second submission;
+//  - audit-log rows about them have actorId NULL;
+//  - preceptors, unit leads and every admin (super_admin included) see
+//    aggregates only, and only once at least 2 trainees have responded.
+// This protects authors from everyone using the app. Someone holding both
+// direct database access and the server secret could still re-identify them.
+model NutritionEvaluationForm {
+  id              String             @id @default(uuid())
+  formType        EvaluationFormType
+  formVersion     Int
+  // Whom the form is about: the trainee for 1.1, 1.2, 3.1 and WEEKLY; the
+  // preceptor for 1.3.
+  subjectId       String
+  // Who filled it in. Always NULL for FORM_1_3.
+  authorId        String?
+  // FORM_1_3 only; NULL on every other form type.
+  authorHash      String?            @unique
+  // Training month, 1–12.
+  monthNumber     Int
+  // The period covered, set server-side by the scheduler: "M01"–"M12" for
+  // monthly and Month 4/8/12 forms, "W01" onwards for weekly check-ins.
+  assessmentPoint String
+  answers         Json
+  totalScore      Int?
+  maxScore        Int?
+  status          SubmissionStatus   @default(DRAFT)
+  submittedAt     DateTime?
+  // The preceptor's comment on a weekly check-in.
+  reviewedById    String?
+  reviewedAt      DateTime?
+  reviewComment   String?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  // Always NULL for FORM_1_3.
+  createdBy       String?
+
+  subject    NutritionProfile  @relation("EvaluationSubject", fields: [subjectId], references: [id], onDelete: Restrict)
+  author     NutritionProfile? @relation("EvaluationAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+  reviewedBy NutritionProfile? @relation("EvaluationReviewer", fields: [reviewedById], references: [id], onDelete: Restrict)
+
+  // One form per type, subject, author and period. Postgres treats NULLs as
+  // distinct, so FORM_1_3 rows (authorId NULL) rely on authorHash's unique
+  // index instead.
+  @@unique([formType, subjectId, authorId, assessmentPoint], map: "nutr_evaluation_form_period_key")
+  @@index([subjectId, formType])
+  @@index([authorId])
+  @@map("nutr_evaluation_form")
+}
+
+// Workplace-based assessment (Step 5): Mini-CEX, DOPS, CbD or OSCE. Scales,
+// domains and the OSCE pass rule live in config/forms.ts; total and passed are
+// computed server-side.
+model NutritionWpba {
+  id              String      @id @default(uuid())
+  type            WpbaType
+  formVersion     Int
+  traineeId       String
+  assessorId      String
+  // Set when a rotation preceptor assesses on a rotation (Step 5).
+  rotationEntryId String?
+  // CbD: the submitted case log under discussion (the plan's "caseRef").
+  caseLogId       String?
+  // DOPS: the procedure observed — a key from config, or free text for "other".
+  procedure       String?
+  scores          Json
+  total           Int?
+  maxScore        Int?
+  // OSCE only: PASS needs ≥ 70% AND no critical error. NULL for other types.
+  passed          Boolean?
+  criticalError   Boolean?
+  millerLevel     MillerLevel
+  feedback        String?
+  // The plan's "date": the day the assessment was observed.
+  assessedOn      DateTime    @db.Date
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  createdBy       String
+
+  trainee          NutritionProfile           @relation("WpbaTrainee", fields: [traineeId], references: [id], onDelete: Restrict)
+  assessor         NutritionProfile           @relation("WpbaAssessor", fields: [assessorId], references: [id], onDelete: Restrict)
+  rotationEntry    NutritionRotationEntry?    @relation(fields: [rotationEntryId], references: [id], onDelete: Restrict)
+  caseLog          NutritionCaseLog?          @relation(fields: [caseLogId], references: [id], onDelete: Restrict)
+  remediationSteps NutritionRemediationStep[]
+
+  @@index([traineeId, type])
+  @@index([assessorId])
+  @@index([rotationEntryId])
+  @@index([caseLogId])
+  @@map("nutr_wpba")
+}
+
+// EPA entrustment decisions (Step 6). A change of level is a NEW row, never an
+// update, so the history behind the progression charts is kept.
+model NutritionEpaAssessment {
+  id          String      @id @default(uuid())
+  traineeId   String
+  // Which EPA. The program's EPA list is not in the spec yet.
+  epaName     String
+  level       EpaLevel
+  millerLevel MillerLevel
+  assessorId  String
+  // The plan's "date".
+  assessedOn  DateTime    @db.Date
+  notes       String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  createdBy   String
+
+  trainee  NutritionProfile @relation("EpaTrainee", fields: [traineeId], references: [id], onDelete: Restrict)
+  assessor NutritionProfile @relation("EpaAssessor", fields: [assessorId], references: [id], onDelete: Restrict)
+
+  @@index([traineeId, epaName, assessedOn])
+  @@index([assessorId])
+  @@map("nutr_epa_assessment")
+}
+
+// Month 9 standards checklist (Step 6): the 4 SOP and 6 SOPP standards.
+// items: [{ standardKey, rating, evidenceRef }] — standardKey from
+// config/forms.ts, rating a StandardRating, evidenceRef a case log or WPBA id.
+model NutritionStandardsChecklist {
+  id          String           @id @default(uuid())
+  traineeId   String
+  monthNumber Int              @default(9)
+  formVersion Int
+  items       Json
+  status      SubmissionStatus @default(DRAFT)
+  submittedAt DateTime?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  createdBy   String
+
+  trainee NutritionProfile @relation(fields: [traineeId], references: [id], onDelete: Restrict)
+
+  @@unique([traineeId, monthNumber])
+  @@map("nutr_standards_checklist")
+}
+
+// 360° multi-source feedback (Step 6): a single-use link for an assessor with
+// no login (nurse, physician, allied staff). Only the SHA-256 hash of the link
+// token is stored; the raw token is shown once, as with AiOpdDevice.
+model NutritionMsfInvite {
+  id           String    @id @default(uuid())
+  traineeId    String
+  tokenHash    String    @unique
+  assessorName String
+  // The plan's "role": the assessor's profession, e.g. "Nurse". Not a NutritionRole.
+  assessorRole String
+  expiresAt    DateTime
+  // Set when the response is submitted; the link is dead from then on.
+  usedAt       DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  createdBy    String
+
+  trainee  NutritionProfile      @relation(fields: [traineeId], references: [id], onDelete: Restrict)
+  response NutritionMsfResponse?
+
+  @@index([traineeId])
+  @@map("nutr_msf_invite")
+}
+
+// An MSF assessor's answers. Anonymous to the trainee; the preceptor sees
+// aggregates only.
+model NutritionMsfResponse {
+  id          String   @id @default(uuid())
+  // Unique: one response per invite, because each link is single-use.
+  inviteId    String   @unique
+  formVersion Int
+  // communication, teamwork, professionalism, interpersonal skills
+  answers     Json
+  comments    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  // Always NULL: the assessor has no account.
+  createdBy   String?
+
+  invite NutritionMsfInvite @relation(fields: [inviteId], references: [id], onDelete: Restrict)
+
+  @@map("nutr_msf_response")
+}
+
+// Remediation (Step 6). A plan groups one trainee's remediation; each step
+// takes one deficiency through the four stages: (1) the deficiency or unmet
+// milestone is flagged; (2) a targeted activity is set, e.g. "3 additional
+// growth-chart cases" or "repeat CbD"; (3) a reassessment date, later linked to
+// the WPBA that reassessed it; (4) on success, the EPA level before and after.
+model NutritionRemediationPlan {
+  id        String    @id @default(uuid())
+  traineeId String
+  // NULL while the plan is open.
+  closedAt  DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  createdBy String
+
+  trainee NutritionProfile           @relation(fields: [traineeId], references: [id], onDelete: Restrict)
+  steps   NutritionRemediationStep[]
+
+  @@index([traineeId])
+  @@map("nutr_remediation_plan")
+}
+
+model NutritionRemediationStep {
+  id               String    @id @default(uuid())
+  planId           String
+  // Order within the plan, from 1.
+  position         Int
+  deficiency       String
+  activity         String?
+  reassessmentDate DateTime? @db.Date
+  linkedWpbaId     String?
+  outcome          String?
+  // The EPA that epaBefore and epaAfter refer to.
+  epaName          String?
+  epaBefore        EpaLevel?
+  epaAfter         EpaLevel?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  createdBy        String
+
+  plan       NutritionRemediationPlan @relation(fields: [planId], references: [id], onDelete: Restrict)
+  linkedWpba NutritionWpba?           @relation(fields: [linkedWpbaId], references: [id], onDelete: Restrict)
+
+  @@unique([planId, position])
+  @@index([linkedWpbaId])
+  @@map("nutr_remediation_step")
+}
+
+// Append-only audit trail: rows are inserted, never updated or deleted. It has
+// `at` and `actorId` (the actor's auth user id) in place of the usual
+// createdAt / updatedAt / createdBy, since a row never changes once written.
+// actorId is NULL for anonymous actions: MSF responses, and anything about a
+// FORM_1_3 form.
+model NutritionAuditLog {
+  id       String   @id @default(uuid())
+  // Model name, e.g. "NutritionCaseLog".
+  entity   String
+  entityId String
+  // e.g. create | update | submit | approve | reject | reopen
+  action   String
+  actorId  String?
+  before   Json?
+  after    Json?
+  at       DateTime @default(now())
+
+  @@index([entity, entityId, at])
+  @@index([actorId, at])
+  @@map("nutr_audit_log")
+}
+
+// Certificate of completion (Step 7). verificationId is the public id in the QR
+// code (/nutrition/verify/[id]): random and unguessable, never the row id.
+model NutritionCredential {
+  id             String    @id @default(uuid())
+  traineeId      String
+  // e.g. "COMPLETION".
+  type           String
+  verificationId String    @unique
+  issuedAt       DateTime
+  // NULL until Step 7 decides how certificates are stored (plan decision 8).
+  pdfPath        String?
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  createdBy      String
+
+  trainee NutritionProfile @relation(fields: [traineeId], references: [id], onDelete: Restrict)
+
+  @@index([traineeId])
+  @@map("nutr_credential")
+}
+
+// ===== End Nutrition E-Portal (CDN-EP) =====
+
+// ===== Nutrition E-Portal: Attendance (CDN-EP Step A) =====
+//
+// Trainee attendance — see CDN-EP-PLAN.md and config/attendance.ts. Additive
+// only: three Nutrition* models on nutr_attendance_* tables and one enum, all
+// appended here. Conventions are those of the block above (createdBy is an auth
+// user id; every other person column is a NutritionProfile id). Relations to
+// NutritionProfile are ON DELETE RESTRICT like the rest of the module; their
+// back-relation fields are the only lines added inside NutritionProfile (no
+// column or index of that model changes). voidedById has no relation: it is
+// an auth user id, and a super_admin may have no profile.
+//
+// Days and times: workDate is the Asia/Karachi calendar day, stored as a
+// @db.Date (Prisma returns it as midnight UTC). checkInAt / checkOutAt are
+// instants. startTime / endTime are Karachi wall-clock "HH:MM".
+//
+// Hand-written in prisma/nutrition-step8.sql, because schema.prisma cannot
+// express them: the partial unique indexes and the CHECK constraints.
+//
+// TODO (STOP AND ASK before adding): rotation and hospital fields.
+
+enum AttendanceStatus {
+  // Recorded by the trainee inside the working window.
+  PRESENT
+  // Set by an editor (super_admin or the primary preceptor) for a day the
+  // trainee attended but could not record inside the window.
+  OUT_OF_WINDOW_RECORDED_BY_STAFF
+
+  @@map("nutr_attendance_status")
+}
+
+// A non-working day. scopeProfileId NULL = program-wide (set by ADMIN);
+// otherwise the PRECEPTOR's profile id, applying to that preceptor's active
+// primary trainees. One LIVE (non-voided) holiday per scope and day: two
+// partial unique indexes in nutrition-step8.sql (one for NULL scope, one for a
+// preceptor scope). Never deleted: a holiday is VOIDED (voidedAt, voidedById,
+// voidReason) and from then on ignored by every check and count.
+model NutritionAttendanceHoliday {
+  id             String    @id @default(uuid())
+  scopeProfileId String?
+  workDate       DateTime  @db.Date
+  name           String
+  voidedAt       DateTime?
+  // The voider's auth user id.
+  voidedById     String?
+  voidReason     String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  createdBy      String
+
+  scope NutritionProfile? @relation("AttendanceHolidayScope", fields: [scopeProfileId], references: [id], onDelete: Restrict)
+
+  @@index([scopeProfileId, workDate])
+  @@index([workDate])
+  @@map("nutr_attendance_holiday")
+}
+
+// The working days and window from effectiveFrom on. scopeProfileId as for
+// holidays. The schedule in force on a day is the scope's row with the latest
+// effectiveFrom on or before that day; one row per scope and effectiveFrom
+// (partial unique indexes in nutrition-step8.sql). A change is a NEW row, so
+// past days keep the schedule they were judged by.
+model NutritionAttendanceSchedule {
+  id             String   @id @default(uuid())
+  scopeProfileId String?
+  // 0 = Sunday … 6 = Saturday (config/attendance.ts). CHECK: non-empty, 0–6.
+  weekdays       Int[]
+  // Karachi "HH:MM"; start included, end excluded. CHECK: format and start < end.
+  startTime      String
+  endTime        String
+  effectiveFrom  DateTime @db.Date
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  createdBy      String
+
+  scope NutritionProfile? @relation("AttendanceScheduleScope", fields: [scopeProfileId], references: [id], onDelete: Restrict)
+
+  @@index([scopeProfileId, effectiveFrom])
+  @@map("nutr_attendance_schedule")
+}
+
+// One trainee's attendance on one Karachi day. Never physically deleted: a
+// super_admin VOIDS a row (voidedAt, voidedById, voidReason); voided rows stay
+// and are left out of every count and graph. At most one non-voided row per
+// trainee and day: a partial unique index in nutrition-step8.sql.
+model NutritionAttendanceRecord {
+  id          String           @id @default(uuid())
+  traineeId   String
+  workDate    DateTime         @db.Date
+  checkInAt   DateTime?
+  checkOutAt  DateTime?
+  status      AttendanceStatus @default(PRESENT)
+  voidedAt    DateTime?
+  // The super_admin's auth user id (a super_admin may have no profile).
+  voidedById  String?
+  voidReason  String?
+  // Set only when an editor created the row for a missed day
+  // (createMissedRecord): why. Never copied into the audit log.
+  staffReason String?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  createdBy   String
+
+  trainee NutritionProfile @relation("AttendanceRecordTrainee", fields: [traineeId], references: [id], onDelete: Restrict)
+
+  @@index([traineeId, workDate])
+  @@index([workDate])
+  @@map("nutr_attendance_record")
+}
+
+// ===== End Nutrition E-Portal: Attendance (CDN-EP Step A) =====

@@ -1,0 +1,6 @@
+# Keep text files LF in the repo and in every checkout. Prisma checksums
+# migration.sql byte for byte, so a CRLF checkout would look like an edited
+# migration to `prisma migrate status`.
+* text=auto eol=lf
+*.png binary
+*.ico binary

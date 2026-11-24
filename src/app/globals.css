@@ -1,0 +1,166 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/*
+  Kill every browser's native focus ring — both :focus (mouse) and
+  :focus-visible (keyboard Tab). !important overrides browser agent
+  stylesheets and any library CSS.
+*/
+*:focus,
+*:focus-visible {
+  outline: none !important;
+  outline-offset: 0 !important;
+  box-shadow: none !important;
+}
+
+/* Date input: red calendar icon */
+input[type="date"] {
+  accent-color: #ef4444;
+  color-scheme: light;
+}
+
+/* ── Dark mode ────────────────────────────────────────────────────────────
+   Every portal page is wrapped in `.portal-content` (NutritionRoot); toggling
+   `.dark` on an ancestor remaps the light utility classes it uses to dark
+   equivalents, and the transition below makes the switch smooth. */
+.portal-content,
+.portal-content .bg-white,
+.portal-content .bg-gray-50,
+.portal-content .bg-gray-100,
+.portal-content .bg-gray-200,
+.portal-content input,
+.portal-content textarea,
+.portal-content select {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+.dark .portal-content { background-color: #0f172a; color: #cbd5e1; }
+
+/* Surfaces */
+.dark .portal-content .bg-white    { background-color: #1e293b !important; }
+.dark .portal-content .bg-gray-50  { background-color: #0f172a !important; }
+.dark .portal-content .bg-gray-100 { background-color: #334155 !important; }
+.dark .portal-content .bg-gray-200 { background-color: #475569 !important; }
+.dark .portal-content .hover\:bg-gray-50:hover  { background-color: #334155 !important; }
+.dark .portal-content .hover\:bg-gray-100:hover { background-color: #475569 !important; }
+
+/* Text */
+.dark .portal-content .text-gray-900 { color: #f1f5f9 !important; }
+.dark .portal-content .text-gray-800 { color: #e2e8f0 !important; }
+.dark .portal-content .text-gray-700 { color: #cbd5e1 !important; }
+.dark .portal-content .text-gray-600 { color: #94a3b8 !important; }
+.dark .portal-content .text-gray-500 { color: #94a3b8 !important; }
+.dark .portal-content .text-gray-400 { color: #64748b !important; }
+
+/* Borders / dividers */
+.dark .portal-content .border-gray-100 { border-color: #1e293b !important; }
+.dark .portal-content .border-gray-200 { border-color: #334155 !important; }
+.dark .portal-content .border-gray-300 { border-color: #475569 !important; }
+.dark .portal-content .divide-gray-100 > :not([hidden]) ~ :not([hidden]) { border-color: #1e293b !important; }
+
+/* Form controls */
+.dark .portal-content input,
+.dark .portal-content textarea,
+.dark .portal-content select {
+  background-color: #1e293b !important;
+  border-color: #334155 !important;
+  color: #e2e8f0 !important;
+}
+.dark .portal-content input::placeholder,
+.dark .portal-content textarea::placeholder { color: #64748b !important; }
+
+/* Recharts (charts render inline SVG colors we can't set via utilities) */
+.dark .portal-content .recharts-cartesian-grid line { stroke: #334155 !important; }
+.dark .portal-content .recharts-cartesian-axis-line,
+.dark .portal-content .recharts-cartesian-axis-tick-line { stroke: #475569 !important; }
+.dark .portal-content .recharts-text { fill: #cbd5e1 !important; }
+.dark .portal-content .recharts-default-tooltip {
+  background-color: #1e293b !important;
+  border-color: #334155 !important;
+}
+.dark .portal-content .recharts-default-tooltip .recharts-tooltip-label,
+.dark .portal-content .recharts-default-tooltip .recharts-tooltip-item { color: #e2e8f0 !important; }
+
+/* ── Motion polish ────────────────────────────────────────────────────────
+   Page content, modals and buttons. Everything
+   here is decorative: each rule is switched off under prefers-reduced-motion
+   at the bottom of this file. */
+
+/* Page transitions. Navigating swaps the element under <main>, and a CSS
+   animation runs whenever an element is inserted — so this plays on each
+   route change without any JavaScript. */
+@keyframes pageIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+.portal-content main > * {
+  animation: pageIn 0.25s ease-out both;
+}
+
+/* Modals: the backdrop fades, the panel scales up from slightly small. On
+   phones a panel pinned to the bottom slides up instead, which is where the
+   thumb already is. */
+@keyframes backdropIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes panelIn {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes sheetUp {
+  from { transform: translateY(100%); }
+  to   { transform: none; }
+}
+.modal-backdrop { animation: backdropIn 0.18s ease-out both; }
+.modal-panel    { animation: panelIn 0.22s ease-out both; }
+@media (max-width: 639px) {
+  .modal-backdrop.items-end .modal-panel { animation: sheetUp 0.24s ease-out both; }
+}
+
+/* Buttons press in and spring back. */
+button {
+  transition: transform 0.12s ease-out;
+}
+button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .portal-content main > *,
+  .modal-backdrop,
+  .modal-panel {
+    animation: none;
+  }
+  button {
+    transition: none;
+  }
+  button:active:not(:disabled) { transform: none; }
+}
+
+/* Anyone who asks their system to reduce motion gets the finished state
+   everywhere, including anything added later that forgets to opt out.
+   Recharts animates in JavaScript, so it is switched off separately — see
+   src/lib/chart-animation.ts. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
